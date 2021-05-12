@@ -1,0 +1,232 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+#pragma kernel Update
+
+struct Boid
+{
+    float2 pos;
+    float2 vel;
+};
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWStructuredBuffer<Boid> Boids;
+
+RWTexture2D<float4> _Result;
+
+uint width;
+uint height;
+
+float deltaTime;
+float time;
+float boidSpeed;
+float dissolveMult;
+float blurMult;
+
+float boidTurnSpeed;
+float boidSearchDistance;
+float boidLookAngle;
+
+float boidVelInDiv;
+float boidCircularVelMult;
+
+
+// Max 4294967295.0;
+uint hash(uint state)
+{
+    state ^= 2747636419u;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    return state;
+}
+
+float hashf(uint state)
+{
+    return hash(state+time*97.315131) / 4294967295.0;
+}
+
+float getBlur(uint2 pos)
+{
+    float4 samples = 0;
+    for (int x = -1; x < 2; x++)
+    {
+        for (int y = -1; y < 2; y++)
+        {
+            int xPos = pos.x + x;
+            int yPos = pos.y + y;
+            xPos %= width;
+            yPos %= height;
+            //if (xPos >= 0 && xPos < width && yPos >= 0 && yPos < height)
+            //{
+                samples += _Result[int2(xPos, yPos)].a;
+            //}
+        }
+
+    }
+    return samples / 9;
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    float4 currentCol = _Result[id.xy];
+    if (currentCol.a <= 0.0f)
+        return;
+    float current = currentCol.a;
+    current = lerp(current, getBlur(id.xy), deltaTime * blurMult);
+    //float noise = (hashf(id.y * width + id.x + deltaTime * 5683751) * .02f) - .01;
+    float a = max(0, current - dissolveMult * deltaTime * (current + .0000001f));
+    //float c = max(0, currentCol.x - 20.0f * deltaTime);
+    _Result[id.xy] = float4( a,a,a, a);
+}
+
+float2 rotate(float2 dir, float rotation)
+{
+    float cR = cos(rotation);
+    float sR = sin(rotation);
+    float2 newDir = float2(
+    cR * dir.x - sR * dir.y,
+    sR * dir.x + cR * dir.y
+    );
+    
+    return newDir;
+}
+
+float2 rotateRandom(float2 dir, int seed, float rndAmount)
+{
+    return rotate(dir, (hashf(seed) * rndAmount * 2)-rndAmount);
+}
+
+float2 findDirection(int id, float2 pos, float2 dir)
+{
+    float2 dirM = dir * boidSearchDistance;
+   //Sample three spots ahead
+    float2 dir1 = rotate(dirM, boidLookAngle);
+    float2 dir2 = rotate(dirM, -boidLookAngle);
+    
+    //float fwd = getBlur(uint2(pos + dirM));
+    //float s1 = getBlur(uint2(pos + dir1));
+    //float s2 = getBlur(uint2(pos + dir2));
+    
+    float fwd = _Result[uint2(pos + dirM)].a;
+    float s1 = _Result[uint2(pos + dir1)].a;
+    float s2 = _Result[uint2(pos + dir2)].a;
+    
+    
+    
+    float random = hashf(id);      
+    
+    //Go forward
+    if (fwd > s1 && fwd > s2)
+    {
+        return dir;
+    }
+    
+    //Random
+    if (fwd < s1 && fwd < s2)
+    {
+        return rotateRandom(dir, id, random * deltaTime * boidTurnSpeed);
+    }
+    
+    if (s1 > s2)
+    {
+        return rotate(dir, random * boidTurnSpeed * deltaTime);
+    }    
+    
+    return rotate(dir, -random * boidTurnSpeed * deltaTime);
+}
+
+Boid limitPosition(float2 pos, float2 vel)
+{
+    Boid b;
+    b.pos = pos;
+    b.vel = vel;
+    float2 newPos = pos;
+    if (newPos.x < 0 || newPos.x >= width)
+    {
+        // Move in
+        newPos.x = min(width - .01f, max(0, newPos.x));
+        // Invert velocity
+        b.vel.x *= -1;
+    }
+    if (newPos.y < 0 || newPos.y >= height)
+    {
+        // Move in
+        newPos.y = min(height - .01f, max(0, newPos.y));
+        // Invert velocity
+        b.vel.y *= -1;
+    }
+    b.pos = newPos;
+    
+    return b;
+}
+
+void limitPositionRnd(uint id)
+{
+    float2 pos = Boids[id].pos;
+    if (pos.x < 0 || pos.x >= width || pos.y < 0 || pos.y >= height)
+    {
+        pos.x = max(0, min(pos.x, width - .001f));
+        pos.y = max(0, min(pos.y, height - .001f));
+        Boids[id].vel = rotateRandom(float2(0, 1), id + time * 69167.42, 3.14 * 2) * boidSpeed;
+    }
+}
+
+void limitPositionCenter(uint id)
+{
+    float2 pos = Boids[id].pos;
+    if (pos.x < 0 || pos.x >= width || pos.y < 0 || pos.y >= height)
+    {
+        pos.x = max(0, min(pos.x, width - .001f));
+        pos.y = max(0, min(pos.y, height - .001f));
+        Boids[id].vel = normalize(float2(width / 2, height / 2) - pos) * boidSpeed;
+    }
+}
+
+void warp(uint id)
+{
+    float2 pos = Boids[id].pos;
+    if (pos.x < 0)
+        pos.x = width - .001f;
+    if (pos.x > width)
+        pos.x = 0;
+    if (pos.y < 0)
+        pos.y = height - .001f;
+    if (pos.y > height)
+        pos.y = 0;
+    Boids[id].pos = pos;
+}
+
+// Update function that moves boids
+[numthreads(64, 1, 1)]
+void Update(uint3 id : SV_DispatchThreadID)
+{
+    Boids[id.x].vel = normalize(Boids[id.x].vel);
+    //Find velocity
+    Boids[id.x].vel = findDirection(id.x, Boids[id.x].pos, Boids[id.x].vel);
+    
+    float2 velIn = (float2(width / 2, height / 2) - Boids[id.x].pos) / (width / boidVelInDiv);
+    float mag = (velIn.x * velIn.x + velIn.y * velIn.y);
+    float2 velInRot = rotate(velIn, .1f);
+   
+    velInRot = normalize(velInRot - velIn);
+    
+    Boids[id.x].vel += pow(velIn, 5) + velInRot * deltaTime * boidCircularVelMult * mag;
+    
+    Boids[id.x].vel *= boidSpeed;
+    Boids[id.x].pos += Boids[id.x].vel *deltaTime;
+    warp(id.x);
+    //limitPositionRnd(id.x);
+    //limitPositionCenter(id.x);
+
+
+    //Boids[id.x] = limitPosition(Boids[id.x].pos, Boids[id.x].vel);
+    float4 r = _Result[Boids[id.x].pos];
+    _Result[Boids[id.x].pos] = float4(r.y, r.y, r.z, 1);
+}
+
+
